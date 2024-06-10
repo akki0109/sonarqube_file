@@ -1,0 +1,167 @@
+---
+- name: Install Java OpenJDK 11
+  hosts: all
+  become: yes
+  tasks:
+    - name: Update package index
+      apt:
+        update_cache: yes
+
+    - name: Install Java OpenJDK 11
+      apt:
+        name: default-jdk
+        state: present
+
+- name: Install PostgreSQL Database System
+  hosts: all
+  become: yes
+  tasks:
+    - name: Add PostgreSQL repository key
+      apt_key:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+
+    - name: Add PostgreSQL repository for Ubuntu
+      apt_repository:
+        repo: "deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_distribution_release }}-pgdg main"
+        state: present
+
+    - name: Update package index
+      apt:
+        update_cache: yes
+
+    - name: Install PostgreSQL 13
+      apt:
+        name: postgresql-13
+        state: present
+
+- name: Create SonarQube PostgreSQL database and user
+  hosts: all
+  tasks:
+    - name: Create PostgreSQL database and user
+      postgresql_db:
+        name: sonarqube
+        login_user: postgres
+        login_password: Password
+        login_host: localhost
+        login_port: 5432
+
+    - name: Grant privileges to the sonarqube user
+      postgresql_user:
+        db: sonarqube
+        name: sonarqube
+        password: Password
+        priv: ALL
+        state: present
+
+- name: Set up System
+  hosts: all
+  become: yes
+  tasks:
+    - name: Create SonarQube user
+      user:
+        name: sonarqube
+        home: /opt/sonarqube
+        shell: /bin/bash
+
+    - name: Set up kernel parameters
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.conf
+        state: present
+      with_items:
+        - { name: "vm.max_map_count", value: "524288" }
+        - { name: "fs.file-max", value: "131072" }
+
+    - name: Apply kernel parameters
+      shell: sysctl --system
+
+    - name: Set up ulimit temporarily
+      shell: "{{ item }}"
+      with_items:
+        - ulimit -n 131072
+        - ulimit -u 8192
+
+    - name: Create ulimit config file
+      template:
+        src: 99-sonarqube.conf.j2
+        dest: /etc/security/limits.d/99-sonarqube.conf
+
+- name: Download and Extract SonarQube
+  hosts: all
+  tasks:
+    - name: Install unzip and wget
+      apt:
+        name: [unzip, wget]
+        state: present
+
+    - name: Download SonarQube
+      get_url:
+        url: "https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-9.6.1.59531.zip"
+        dest: "/tmp/sonarqube-9.6.1.59531.zip"
+
+    - name: Extract SonarQube
+      unarchive:
+        src: "/tmp/sonarqube-9.6.1.59531.zip"
+        dest: "/opt/"
+        remote_src: yes
+        creates: "/opt/sonarqube-9.6.1.59531"
+
+    - name: Move SonarQube installation directory
+      shell: mv /opt/sonarqube-9.6.1.59531 /opt/sonarqube
+
+    - name: Change ownership of SonarQube directory
+      file:
+        path: "/opt/sonarqube"
+        owner: sonarqube
+        group: sonarqube
+        recurse: yes
+
+- name: Configure SonarQube
+  hosts: all
+  tasks:
+    - name: Copy SonarQube config file
+      template:
+        src: sonar.properties.j2
+        dest: "/opt/sonarqube/conf/sonar.properties"
+
+    - name: Set up SonarQube as a systemd service
+      copy:
+        src: sonarqube.service.j2
+        dest: "/etc/systemd/system/sonarqube.service"
+
+    - name: Reload systemd manager
+      systemd:
+        daemon_reload: yes
+
+    - name: Start and enable SonarQube service
+      systemd:
+        name: sonarqube
+        state: started
+        enabled: yes
+
+- name: Install and Configure Nginx as Reverse Proxy
+  hosts: all
+  become: yes
+  tasks:
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Create Nginx server block for SonarQube
+      template:
+        src: sonarqube_nginx.conf.j2
+        dest: "/etc/nginx/sites-available/sonarqube.conf"
+
+    - name: Enable Nginx server block
+      file:
+        src: "/etc/nginx/sites-available/sonarqube.conf"
+        dest: "/etc/nginx/sites-enabled/sonarqube.conf"
+        state: link
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+
